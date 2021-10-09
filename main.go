@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 
@@ -37,9 +38,14 @@ func main() {
 	}
 	var pendingCandidates = []string{}
 	var dataChan *webrtc.DataChannel
+	var dataChanWG sync.WaitGroup
+	dataChanWG.Add(1)
 	go func() {
 		for {
 			lineBytes, isPrefix, err := pipe.Reader.ReadLine()
+			if err == io.EOF {
+				break
+			}
 			// TODO: handle isPrefix
 			if err != nil || isPrefix {
 				panic(err)
@@ -88,6 +94,8 @@ func main() {
 				if iceErr := peerConn.AddICECandidate(webrtc.ICECandidateInit{Candidate: string(body)}); iceErr != nil {
 					panic(iceErr)
 				}
+			case "datachannel-ready":
+				dataChanWG.Done()
 			}
 		}
 	}()
@@ -139,15 +147,41 @@ func main() {
 		})
 		wg.Wait()
 	}
-	dataChan.OnMessage(func(msg webrtc.DataChannelMessage) {
-		os.Stdout.Write(msg.Data)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	dataChan.OnClose(func() {
+		writeToStderr("[p2ping] webrtc.datachannel: close\n")
 	})
+	dataChan.OnMessage(func(msg webrtc.DataChannelMessage) {
+		if msg.IsString {
+			switch string(msg.Data) {
+			case "close":
+				os.Stdout.Close()
+				wg.Done()
+				dataChan.SendText("close-accept")
+			case "close-accept":
+				wg.Done()
+			}
+		} else {
+			os.Stdout.Write(msg.Data)
+		}
+	})
+	pipe.WriteMessage("datachannel-ready", "ready")
+	dataChanWG.Wait()
 	arr := make([]byte, 4096)
 	for {
 		n, err := os.Stdin.Read(arr)
+		if n > 0 {
+			dataChan.Send(arr[:n])
+		}
 		if err != nil {
+			if err == io.EOF {
+				dataChan.SendText("close")
+				break
+			}
 			panic(err)
 		}
-		dataChan.Send(arr[:n])
 	}
+	wg.Wait()
+	dataChan.Close()
 }
