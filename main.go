@@ -168,8 +168,16 @@ func main() {
 	})
 	pipe.WriteMessage("datachannel-ready", "ready")
 	dataChanWG.Wait()
+	dataChan.SetBufferedAmountLowThreshold(8 * 1024 * 1024)
 	arr := make([]byte, 4096)
+	c := make(chan struct{})
+	dataChan.OnBufferedAmountLow(func() {
+		c <- struct{}{}
+	})
 	for {
+		if dataChan.BufferedAmount() > 16*1024*1024 {
+			<-c
+		}
 		n, err := os.Stdin.Read(arr)
 		if n > 0 {
 			dataChan.Send(arr[:n])
